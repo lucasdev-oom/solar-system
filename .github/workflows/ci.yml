@@ -4,39 +4,39 @@ on:
   push:
     branches:
       - main
+      - develop
 
 env:
   IMAGE_NAME: solar-system
-  REGISTRY: docker.io
+  DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
 
 jobs:
+  # ─────────────────────────────
+  # JOB 1: Unit Tests (always run)
+  # ─────────────────────────────
   unit-tests:
     name: Unit Tests
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
+      - uses: actions/checkout@v4
       - name: Run Unit Tests
-        run: |
-          echo "Running unit tests..."
-          # Add your real test commands here
+        run: echo "Running tests..."
 
+  # ─────────────────────────────
+  # JOB 2: Build & Push Image
+  # ─────────────────────────────
   build-and-push:
-    name: Build and Push Docker Image
+    name: Build & Push Docker Image
     runs-on: ubuntu-latest
     needs: unit-tests
     outputs:
       image_tag: ${{ steps.set_tag.outputs.image_tag }}
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Set image tag
         id: set_tag
-        run: |
-          TAG="${{ github.run_number }}-${{ github.sha }}"
-          echo "image_tag=${TAG}" >> "$GITHUB_OUTPUT"
+        run: echo "image_tag=${{ github.run_number }}-${{ github.sha }}" >> $GITHUB_OUTPUT
 
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
@@ -44,37 +44,68 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build Docker image
+      - name: Build & Push image
         run: |
-          docker build -t ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ steps.set_tag.outputs.image_tag }} .
+          IMAGE="${{ env.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ steps.set_tag.outputs.image_tag }}"
+          docker build -t $IMAGE .
+          docker push $IMAGE
 
-      - name: Push Docker image
-        run: |
-          docker push ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ steps.set_tag.outputs.image_tag }}
-
-  update-gitops-repo:
-    name: Update GitOps Manifest
+  # ─────────────────────────────────────────────────
+  # JOB 3a: Update STAGING manifest (develop branch)
+  # ─────────────────────────────────────────────────
+  update-staging:
+    name: Deploy to Staging
     runs-on: ubuntu-latest
     needs: build-and-push
+    if: github.ref == 'refs/heads/develop'    # ← only runs on develop push
     steps:
-      - name: Checkout GitOps repo
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           repository: lucasdev-oom/gitops-argocd
           token: ${{ secrets.GITOPS_TOKEN }}
           path: gitops-argocd
 
-      - name: Update image tag in deployment.yml
+      - name: Update staging deployment.yml
         run: |
           NEW_IMAGE="${{ secrets.DOCKERHUB_USERNAME }}/solar-system:${{ needs.build-and-push.outputs.image_tag }}"
-          sed -i "s|image:.*|image: ${NEW_IMAGE}|g" gitops-argocd/solar-system/deployment.yml
-          cat gitops-argocd/solar-system/deployment.yml
+          sed -i "s|image:.*|image: ${NEW_IMAGE}|g" gitops-argocd/solar-system/staging/deployment.yml
+          cat gitops-argocd/solar-system/staging/deployment.yml
 
-      - name: Commit and push changes
+      - name: Commit & Push to GitOps repo
         run: |
           cd gitops-argocd
           git config user.email "github-actions@github.com"
           git config user.name "GitHub Actions"
-          git add solar-system/deployment.yml
-          git commit -m "ci: update solar-system image to ${{ needs.build-and-push.outputs.image_tag }}" || echo "No changes to commit"
+          git add solar-system/staging/deployment.yml
+          git commit -m "ci: deploy solar-system to staging - ${{ needs.build-and-push.outputs.image_tag }}"
+          git push origin main
+
+  # ──────────────────────────────────────────────────────
+  # JOB 3b: Update PRODUCTION manifest (main branch only)
+  # ──────────────────────────────────────────────────────
+  update-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    if: github.ref == 'refs/heads/main'       # ← only runs on main push
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: lucasdev-oom/gitops-argocd
+          token: ${{ secrets.GITOPS_TOKEN }}
+          path: gitops-argocd
+
+      - name: Update production deployment.yml
+        run: |
+          NEW_IMAGE="${{ secrets.DOCKERHUB_USERNAME }}/solar-system:${{ needs.build-and-push.outputs.image_tag }}"
+          sed -i "s|image:.*|image: ${NEW_IMAGE}|g" gitops-argocd/solar-system/production/deployment.yml
+          cat gitops-argocd/solar-system/production/deployment.yml
+
+      - name: Commit & Push to GitOps repo
+        run: |
+          cd gitops-argocd
+          git config user.email "github-actions@github.com"
+          git config user.name "GitHub Actions"
+          git add solar-system/production/deployment.yml
+          git commit -m "ci: deploy solar-system to production - ${{ needs.build-and-push.outputs.image_tag }}"
           git push origin main
